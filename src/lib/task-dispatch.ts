@@ -29,9 +29,9 @@ interface DispatchableTask {
  * to the OpenClaw gateway. Uses keyword signals on title + description.
  *
  * Tiers:
- *   ROUTINE  → cheap model (Haiku)   — file ops, status checks, formatting
- *   MODERATE → mid model  (Sonnet)   — code gen, summaries, analysis, drafts
- *   COMPLEX  → premium model (Opus)  — debugging, architecture, novel problems
+ *   ROUTINE  → ollama/phi4-mini        — file ops, status checks, formatting
+ *   MODERATE → null (agent default)    — code gen, summaries, analysis, drafts
+ *   COMPLEX  → moonshot/kimi-k2.5      — debugging, architecture, novel problems
  *
  * The caller may override this by setting agent.config.dispatchModel.
  */
@@ -54,10 +54,10 @@ function classifyTaskModel(task: DispatchableTask): string | null {
     'refactor', 'migration', 'performance optim', 'why is',
   ]
   if (priority === 'critical' || complexSignals.some(s => text.includes(s))) {
-    return '9router/cc/claude-opus-4-6'
+    return 'moonshot/kimi-k2.5'
   }
 
-  // Routine signals → Haiku
+  // Routine signals → phi4-mini (fast local model)
   const routineSignals = [
     'status check', 'health check', 'ping', 'list ', 'fetch ', 'format',
     'rename', 'move file', 'read file', 'update readme', 'bump version',
@@ -65,10 +65,10 @@ function classifyTaskModel(task: DispatchableTask): string | null {
     'quick ', 'simple ', 'routine ', 'minor ',
   ]
   if (priority === 'low' && routineSignals.some(s => text.includes(s))) {
-    return '9router/cc/claude-haiku-4-5-20251001'
+    return 'ollama/phi4-mini'
   }
   if (routineSignals.some(s => text.includes(s)) && priority !== 'high' && priority !== 'critical') {
-    return '9router/cc/claude-haiku-4-5-20251001'
+    return 'ollama/phi4-mini'
   }
 
   // Default: let the agent's own configured model handle it (no override)
