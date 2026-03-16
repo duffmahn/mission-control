@@ -432,7 +432,7 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
       const agentTimeoutSec = String(isComplex ? Math.max(600, agentConfigTimeout) : Math.max(120, agentConfigTimeout))
       const agentTimeoutMs = (parseInt(agentTimeoutSec) + 10) * 1000
       const finalResult = await runOpenClaw(
-        ['agent', '--agent', gatewayAgentId, '--message', prompt, '--local', '--json', '--timeout', agentTimeoutSec],
+        ['agent', '--agent', gatewayAgentId, '--message', prompt, '--json', '--timeout', agentTimeoutSec],
         { timeoutMs: agentTimeoutMs }
       )
       const finalPayload = parseGatewayJson(finalResult.stdout)
