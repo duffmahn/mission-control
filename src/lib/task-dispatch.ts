@@ -239,7 +239,7 @@ export async function runAegisReviews(): Promise<{ ok: boolean; message: string 
     LEFT JOIN agents a ON a.name = t.assigned_to AND a.workspace_id = t.workspace_id
     WHERE t.status = 'review'
     ORDER BY t.updated_at ASC
-    LIMIT 3
+    LIMIT 1
   `).all() as ReviewableTask[]
 
   if (tasks.length === 0) {
@@ -264,8 +264,8 @@ export async function runAegisReviews(): Promise<{ ok: boolean; message: string 
       const reviewAgent = resolveGatewayAgentIdForReview(task)
 
       const finalResult = await runOpenClaw(
-        ['agent', '--agent', reviewAgent, '--message', prompt, '--json', '--timeout', '120'],
-        { timeoutMs: 125_000 }
+        ['agent', '--agent', reviewAgent, '--message', prompt, '--json', '--timeout', '300'],
+        { timeoutMs: 310_000 }
       )
       const finalPayload = parseGatewayJson(finalResult.stdout)
         ?? parseGatewayJson(String((finalResult as any)?.stderr || ''))
@@ -365,7 +365,7 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
     ORDER BY
       CASE t.priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END ASC,
       t.created_at ASC
-    LIMIT 3
+    LIMIT 1
   `).all() as (DispatchableTask & { tags?: string })[]
 
   if (tasks.length === 0) {
@@ -416,10 +416,24 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
 
       // Invoke agent directly via openclaw agent command.
       // --timeout is in seconds; timeoutMs gives 5s of buffer for process overhead.
+      // Critical tasks get 600s (10 min) to handle complex build/API work.
       const gatewayAgentId = resolveGatewayAgentId(task)
+      // Use agent's configured timeoutSeconds if available, with priority floor
+      let agentConfigTimeout = 120
+      if (task.agent_config) {
+        try {
+          const cfg = JSON.parse(task.agent_config)
+          if (typeof cfg.timeoutSeconds === 'number' && cfg.timeoutSeconds > agentConfigTimeout) {
+            agentConfigTimeout = cfg.timeoutSeconds
+          }
+        } catch { /* ignore */ }
+      }
+      const isComplex = task.priority === 'critical' || task.priority === 'high'
+      const agentTimeoutSec = String(isComplex ? Math.max(600, agentConfigTimeout) : Math.max(120, agentConfigTimeout))
+      const agentTimeoutMs = (parseInt(agentTimeoutSec) + 10) * 1000
       const finalResult = await runOpenClaw(
-        ['agent', '--agent', gatewayAgentId, '--message', prompt, '--json', '--timeout', '120'],
-        { timeoutMs: 125_000 }
+        ['agent', '--agent', gatewayAgentId, '--message', prompt, '--local', '--json', '--timeout', agentTimeoutSec],
+        { timeoutMs: agentTimeoutMs }
       )
       const finalPayload = parseGatewayJson(finalResult.stdout)
         ?? parseGatewayJson(String((finalResult as any)?.stderr || ''))

@@ -6,6 +6,7 @@
     "verify:node": "node scripts/check-node-version.mjs",
     "dev": "pnpm run verify:node && next dev --hostname 127.0.0.1 --port ${PORT:-3000}",
     "build": "pnpm run verify:node && next build",
+    "postbuild": "ln -sfn $(pwd)/.next/static .next/standalone/jarvis/mission-control/.next/static && ln -sfn $(pwd)/public .next/standalone/jarvis/mission-control/public",
     "start": "pnpm run verify:node && next start --hostname 0.0.0.0 --port ${PORT:-3000}",
     "start:standalone": "pnpm run verify:node && bash scripts/start-standalone.sh",
     "deploy:standalone": "pnpm run verify:node && bash scripts/deploy-standalone.sh",
