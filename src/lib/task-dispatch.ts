@@ -261,21 +261,10 @@ export async function runAegisReviews(): Promise<{ ok: boolean; message: string 
 
     try {
       const prompt = buildReviewPrompt(task)
-      // Resolve the gateway agent ID from config, falling back to assigned_to or default
       const reviewAgent = resolveGatewayAgentIdForReview(task)
 
-      const invokeParams = {
-        message: prompt,
-        agentId: reviewAgent,
-        idempotencyKey: `aegis-review-${task.id}-${Date.now()}`,
-        deliver: false,
-      }
-      // Use --expect-final to block until the agent completes and returns the full
-      // response payload (payloads[0].text). The two-step agent → agent.wait pattern
-      // only returns lifecycle metadata (runId/status/timestamps) and never includes
-      // the agent's actual text, so Aegis could never parse a verdict.
       const finalResult = await runOpenClaw(
-        ['gateway', 'call', 'agent', '--expect-final', '--timeout', '120000', '--params', JSON.stringify(invokeParams), '--json'],
+        ['agent', '--agent', reviewAgent, '--message', prompt, '--json', '--timeout', '120'],
         { timeoutMs: 125_000 }
       )
       const finalPayload = parseGatewayJson(finalResult.stdout)
@@ -425,24 +414,11 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
 
       const prompt = buildTaskPrompt(task, rejectionFeedback)
 
-      // Step 1: Invoke via gateway
+      // Invoke agent directly via openclaw agent command.
+      // --timeout is in seconds; timeoutMs gives 5s of buffer for process overhead.
       const gatewayAgentId = resolveGatewayAgentId(task)
-      const dispatchModel = classifyTaskModel(task)
-      const invokeParams: Record<string, unknown> = {
-        message: prompt,
-        agentId: gatewayAgentId,
-        idempotencyKey: `task-dispatch-${task.id}-${Date.now()}`,
-        deliver: false,
-      }
-      // Route to appropriate model tier based on task complexity.
-      // null = no override, agent uses its own configured default model.
-      if (dispatchModel) invokeParams.model = dispatchModel
-
-      // Use --expect-final to block until the agent completes and returns the full
-      // response payload (result.payloads[0].text). The two-step agent → agent.wait
-      // pattern only returns lifecycle metadata and never includes the agent's text.
       const finalResult = await runOpenClaw(
-        ['gateway', 'call', 'agent', '--expect-final', '--timeout', '120000', '--params', JSON.stringify(invokeParams), '--json'],
+        ['agent', '--agent', gatewayAgentId, '--message', prompt, '--json', '--timeout', '120'],
         { timeoutMs: 125_000 }
       )
       const finalPayload = parseGatewayJson(finalResult.stdout)
