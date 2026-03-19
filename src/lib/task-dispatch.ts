@@ -451,44 +451,47 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
           sessionId: sendResult?.runId || targetSession,
         }
       } else {
-        // Step 1: Invoke via gateway (new session)
+        // Fire-and-forget dispatch via gateway.  The agent processes the task
+        // asynchronously; we don't block waiting for its response.  This avoids
+        // gateway timeouts when Kimi / other models need 5+ minutes per turn.
         const gatewayAgentId = resolveGatewayAgentId(task)
-        const dispatchModel = classifyTaskModel(task)
         const invokeParams: Record<string, unknown> = {
           message: prompt,
           agentId: gatewayAgentId,
           idempotencyKey: `task-dispatch-${task.id}-${Date.now()}`,
           deliver: false,
         }
-        // Route to appropriate model tier based on task complexity.
-        // null = no override, agent uses its own configured default model.
-        if (dispatchModel) invokeParams.model = dispatchModel
 
-        // Use --expect-final to block until the agent completes and returns the full
-        // response payload (result.payloads[0].text). The two-step agent → agent.wait
-        // pattern only returns lifecycle metadata and never includes the agent's text.
-        const finalResult = await runOpenClaw(
-          ['gateway', 'call', 'agent', '--expect-final', '--timeout', '120000', '--params', JSON.stringify(invokeParams), '--json'],
-          { timeoutMs: 125_000 }
+        // Invoke without --expect-final so the call returns immediately once
+        // the gateway has accepted the request and started the agent session.
+        const invokeResult = await runOpenClaw(
+          ['gateway', 'call', 'agent', '--timeout', '30000', '--params', JSON.stringify(invokeParams), '--json'],
+          { timeoutMs: 35_000 }
         )
-        const finalPayload = parseGatewayJson(finalResult.stdout)
-          ?? parseGatewayJson(String((finalResult as any)?.stderr || ''))
+        const invokePayload = parseGatewayJson(invokeResult.stdout)
+          ?? parseGatewayJson(String((invokeResult as any)?.stderr || ''))
 
-        agentResponse = parseAgentResponse(
-          finalPayload?.result ? JSON.stringify(finalPayload.result) : finalResult.stdout
-        )
-        if (!agentResponse.sessionId && finalPayload?.result?.meta?.agentMeta?.sessionId) {
-          agentResponse.sessionId = finalPayload.result.meta.agentMeta.sessionId
+        const runId: string | null = invokePayload?.runId
+          ?? invokePayload?.result?.runId
+          ?? invokePayload?.result?.meta?.agentMeta?.sessionId
+          ?? null
+        if (!runId) {
+          // If the gateway returned but without a runId, log warning but don't fail
+          logger.warn({ taskId: task.id, raw: invokeResult.stdout.substring(0, 200) }, 'Gateway accepted dispatch but returned no runId')
+        }
+
+        agentResponse = {
+          text: `Task dispatched to agent ${gatewayAgentId}. The agent is processing it asynchronously.`,
+          sessionId: runId,
         }
       } // end else (new session dispatch)
 
-      if (!agentResponse.text) {
-        throw new Error('Agent returned empty response')
-      }
-
-      const truncated = agentResponse.text.length > 10_000
+      // For fire-and-forget dispatch, the task stays in_progress.
+      // The agent's response will arrive via the session; a separate
+      // collection step (or manual review) moves it to review/done.
+      const truncated = agentResponse.text && agentResponse.text.length > 10_000
         ? agentResponse.text.substring(0, 10_000) + '\n\n[Response truncated at 10,000 characters]'
-        : agentResponse.text
+        : agentResponse.text || 'Dispatched (awaiting agent response)'
 
       // Merge dispatch_session_id into existing metadata
       const existingMeta = (() => {
@@ -500,50 +503,45 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
       if (agentResponse.sessionId) {
         existingMeta.dispatch_session_id = agentResponse.sessionId
       }
+      existingMeta.dispatched_at = Math.floor(Date.now() / 1000)
 
-      // Update task: status → review, set outcome
+      // Leave in_progress (not review) — the agent is still working.
+      // Store the dispatch note as resolution for visibility.
       db.prepare(`
-        UPDATE tasks SET status = ?, outcome = ?, resolution = ?, metadata = ?, updated_at = ? WHERE id = ?
-      `).run('review', 'success', truncated, JSON.stringify(existingMeta), Math.floor(Date.now() / 1000), task.id)
+        UPDATE tasks SET resolution = ?, metadata = ?, updated_at = ? WHERE id = ?
+      `).run(truncated, JSON.stringify(existingMeta), Math.floor(Date.now() / 1000), task.id)
 
-      // Add a comment from the agent with the full response
+      // Add a comment noting the dispatch
       db.prepare(`
         INSERT INTO comments (task_id, author, content, created_at, workspace_id)
         VALUES (?, ?, ?, ?, ?)
       `).run(
         task.id,
-        task.agent_name,
-        truncated,
+        'scheduler',
+        `Dispatched to ${task.agent_name} via gateway (session: ${agentResponse.sessionId || 'unknown'})`,
         Math.floor(Date.now() / 1000),
         task.workspace_id
       )
 
-      eventBus.broadcast('task.status_changed', {
-        id: task.id,
-        status: 'review',
-        previous_status: 'in_progress',
-      })
-
       eventBus.broadcast('task.updated', {
         id: task.id,
-        status: 'review',
-        outcome: 'success',
+        status: 'in_progress',
         assigned_to: task.assigned_to,
         dispatch_session_id: agentResponse.sessionId,
       })
 
       db_helpers.logActivity(
-        'task_agent_completed',
+        'task_dispatched_async',
         'task',
         task.id,
         task.agent_name,
-        `Agent completed task "${task.title}" — awaiting review`,
-        { response_length: agentResponse.text.length, dispatch_session_id: agentResponse.sessionId },
+        `Task "${task.title}" dispatched to agent ${task.agent_name} (async)`,
+        { dispatch_session_id: agentResponse.sessionId },
         task.workspace_id
       )
 
       results.push({ id: task.id, success: true })
-      logger.info({ taskId: task.id, agent: task.agent_name }, 'Task dispatched and completed')
+      logger.info({ taskId: task.id, agent: task.agent_name, sessionId: agentResponse.sessionId }, 'Task dispatched (fire-and-forget)')
     } catch (err: any) {
       const errorMsg = err.message || 'Unknown error'
       logger.error({ taskId: task.id, agent: task.agent_name, err }, 'Task dispatch failed')
